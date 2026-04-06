@@ -21,7 +21,7 @@ This Business Requirement Document (BRD) defines the comprehensive CRM system fo
 3. **Operational Efficiency**: Automate stage transitions, assignments, and communication flows
 4. **Partner Enablement**: Empower partners with lead management and commission tracking
 5. **Data Integrity**: Eliminate duplicate leads/opportunities through intelligent detection
-6. **Real-Time Synchronization**: Ensure all modules Events, Exams, Sales, Marketing stay in sync
+6. **Real-Time Synchronization**: Ensure all modules stay in sync
 
 ### 1.3 High-Level System Overview
 
