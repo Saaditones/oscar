@@ -1,0 +1,335 @@
+# Final Activity Report
+
+Scope of work:
+- Database: `viva_live_copy_FC`
+- Company: `Infinitee Xclusives Ltd.` (`res_company.id = 9`)
+- Environment: local DevEnv only, no GitLab push, no production impact
+
+## 1. Initial scoping and confirmation
+
+We confirmed the correct company scope and worked only on `Infinitee Xclusives Ltd.` inside `viva_live_copy_FC`.
+
+We identified two different companies early on:
+- `INFINITEE EXCLUSIVES B.V.` (`company_id = 11`) was not our target
+- `Infinitee Xclusives Ltd` (`company_id = 9`) was the correct scope for all later analysis
+
+## 2. Amazon sales / stock process investigation
+
+We traced the Amazon sales flow and confirmed:
+- FBA-style Amazon orders in this database create direct `stock.move` records, not `stock.picking`
+- this behavior comes from Odoo Amazon flow, not from a normal warehouse delivery flow
+- journal entries for stock valuation are expected only when valuation rules apply
+
+Key conclusion from the early phase:
+- absence of a `stock.picking` for many Amazon orders was normal in this setup
+- the real issue was not "missing pickings" but whether moves reached `done` and whether valuation/accounting followed
+
+## 3. Full system audit
+
+We ran a broad audit across sales, invoices, stock moves, valuation, and accounting.
+
+Main outputs:
+- [full_system_audit_report_20260516T130203Z.md](/mnt/projects/Viva-City/live_cclone_saad/plan-md/full_system_audit_report_20260516T130203Z.md)
+- [full_audit_monthly_financials_20260516T130203Z.csv](/mnt/projects/Viva-City/live_cclone_saad/plan-md/full_audit_monthly_financials_20260516T130203Z.csv)
+- [full_audit_open_moves_by_month_20260516T130203Z.csv](/mnt/projects/Viva-City/live_cclone_saad/plan-md/full_audit_open_moves_by_month_20260516T130203Z.csv)
+- [full_audit_draft_invoice_issues_20260516T130203Z.csv](/mnt/projects/Viva-City/live_cclone_saad/plan-md/full_audit_draft_invoice_issues_20260516T130203Z.csv)
+- [full_audit_negative_quants_20260516T130203Z.csv](/mnt/projects/Viva-City/live_cclone_saad/plan-md/full_audit_negative_quants_20260516T130203Z.csv)
+
+Main findings from that audit:
+- very large Amazon outbound move backlog not reaching `done`
+- major draft invoice problems in the Amazon invoice flow
+- negative inventory history and negative quants in key locations
+- month-wise sales and COGS mismatches
+
+## 4. Open Amazon outbound move analysis
+
+We isolated the Amazon customer-delivery backlog and exported it:
+- [infinitee_open_amazon_customer_delivery_moves.csv](/mnt/projects/Viva-City/live_cclone_saad/plan-md/infinitee_open_amazon_customer_delivery_moves.csv)
+
+At that stage we identified:
+- `10,111` open Amazon storable customer-delivery moves
+- the backlog was concentrated in January through April 2026
+- these open moves were preventing COGS posting in a non-Anglo-Saxon stock-accounting flow
+
+We then built a planning comparison:
+- [infinitee_pnl_current_vs_projected_open_moves.csv](/mnt/projects/Viva-City/live_cclone_saad/plan-md/infinitee_pnl_current_vs_projected_open_moves.csv)
+
+That file compared:
+- current month-wise P&L / COGS
+- projected additional COGS if open outbound moves were completed into their original accounting period
+
+## 5. Safe pilot scripts for completing backlog
+
+We created reusable local scripts for controlled stock completion:
+- [pilot_complete_open_amazon_moves.py](/mnt/projects/Viva-City/live_cclone_saad/plan-md/pilot_complete_open_amazon_moves.py)
+- [pilot_complete_open_amazon_moves_safe.py](/mnt/projects/Viva-City/live_cclone_saad/plan-md/pilot_complete_open_amazon_moves_safe.py)
+- [pilot_complete_open_amazon_moves_README.md](/mnt/projects/Viva-City/live_cclone_saad/plan-md/pilot_complete_open_amazon_moves_README.md)
+
+The safe runner:
+- filtered eligible moves
+- skipped moves that would push stock negative
+- posted stock valuation using each move's original accounting date
+- produced CSV and summary artifacts for each month
+
+## 6. Month-by-month backlog recovery before stock top-up
+
+We first ran a safe pass without forcing stock corrections.
+
+Results at that stage:
+- April 2026: most moves recovered, but a blocked remainder remained
+- March 2026: majority recovered, some blocked by shortage
+- February 2026: majority recovered, some blocked by shortage
+- January 2026: significant recovery, still many blocked
+
+Artifacts from those runs include:
+- `pilot_safe_open_amazon_moves_2026-01_*`
+- `pilot_safe_open_amazon_moves_2026-02_*`
+- `pilot_safe_open_amazon_moves_2026-03_*`
+- `pilot_safe_open_amazon_moves_2026-04_*`
+
+These runs confirmed:
+- the remaining blocked population was mostly genuine stock-shortage / negative-stock prevention
+- the blocker SKUs were concentrated in `Infin/Amazon`
+
+## 7. Blocked-stock correction analysis
+
+We built a combined Jan-Apr correction set for the blocked remainder:
+- [jan_apr_blocked_stock_corrections_report_20260519T123827Z.md](/mnt/projects/Viva-City/live_cclone_saad/plan-md/jan_apr_blocked_stock_corrections_report_20260519T123827Z.md)
+- [jan_apr_blocked_stock_corrections_summary_20260519T123827Z.csv](/mnt/projects/Viva-City/live_cclone_saad/plan-md/jan_apr_blocked_stock_corrections_summary_20260519T123827Z.csv)
+- [jan_apr_blocked_stock_corrections_detail_20260519T123827Z.csv](/mnt/projects/Viva-City/live_cclone_saad/plan-md/jan_apr_blocked_stock_corrections_detail_20260519T123827Z.csv)
+
+This told us exactly:
+- which SKUs were still blocking completion
+- from which location
+- the open quantity involved
+- the projected blocked COGS
+
+Top shortage SKUs were:
+- `LUX-PK2-TWL-WHT`
+- `LUX-PK2-TWL-DGY`
+- `TW-BLK-KTH-6`
+- `LUX-PK2-TWL-LGY`
+- `TWL-HND-PUR-6`
+
+## 8. Targeted single-move recovery tests
+
+Before doing a full month stock-top-up pass, we tested the correction pattern on individual blocked January moves.
+
+We created:
+- [complete_single_blocked_move.py](/mnt/projects/Viva-City/live_cclone_saad/plan-md/complete_single_blocked_move.py)
+
+We then completed:
+- move `105047`, sale order `S93274`, SKU `LUX-PK2-TWL-WHT`, month `2026-01`
+- move `105048`, sale order `S93275`, SKU `LUX-PK2-TWL-LGY`, month `2026-01`
+
+For each test:
+- we added a minimal stock top-up
+- completed the move
+- confirmed that the delivery-side stock journal posted back into January
+- confirmed the unlocking inventory adjustment posted with the current date
+
+This validated the method before running at month scale.
+
+## 9. Full Jan-Apr stock-top-up completion run
+
+We then built and ran a month-level recovery runner:
+- [complete_open_month_with_stock_topup.py](/mnt/projects/Viva-City/live_cclone_saad/plan-md/complete_open_month_with_stock_topup.py)
+
+This runner:
+- grouped remaining open moves by product/location for a given month
+- created stock top-ups in the source location
+- marked move / move lines as picked when needed
+- completed each move
+- forced stock valuation accounting back into the move's original accounting month
+- wrote top-up and result CSVs per month
+
+Outputs:
+- [month_completion_summary_2026-01_stock_topup_execute_20260519T130953Z.txt](/mnt/projects/Viva-City/live_cclone_saad/plan-md/month_completion_summary_2026-01_stock_topup_execute_20260519T130953Z.txt)
+- [month_completion_summary_2026-02_stock_topup_execute_20260519T131246Z.txt](/mnt/projects/Viva-City/live_cclone_saad/plan-md/month_completion_summary_2026-02_stock_topup_execute_20260519T131246Z.txt)
+- [month_completion_summary_2026-03_stock_topup_execute_20260519T131313Z.txt](/mnt/projects/Viva-City/live_cclone_saad/plan-md/month_completion_summary_2026-03_stock_topup_execute_20260519T131313Z.txt)
+- [month_completion_summary_2026-04_stock_topup_execute_20260519T131332Z.txt](/mnt/projects/Viva-City/live_cclone_saad/plan-md/month_completion_summary_2026-04_stock_topup_execute_20260519T131332Z.txt)
+
+Month results:
+- January 2026: `443` moves done, `0` blocked
+- February 2026: `77` moves done, `0` blocked
+- March 2026: `58` moves done, `0` blocked
+- April 2026: `618` moves done, `1` blocked in the main runner
+
+Additional top-up detail files:
+- `month_stock_topups_2026-01_*`
+- `month_stock_topups_2026-02_*`
+- `month_stock_topups_2026-03_*`
+- `month_stock_topups_2026-04_*`
+
+Additional move result files:
+- `month_completion_results_2026-01_*`
+- `month_completion_results_2026-02_*`
+- `month_completion_results_2026-03_*`
+- `month_completion_results_2026-04_*`
+
+## 10. Final April holdout and code-level bug fix
+
+The only remaining open move after the month runner was:
+- move `204742`
+- sale order `S141700`
+- SKU `TW-GRY-KTH-6`
+- source `Infin/Stock`
+- picking `Infin/OUT/00032`
+
+This was not a stock-shortage issue.
+
+Root cause:
+- a custom override in [ol_custom_amazon/model/custom_amazon.py](/mnt/projects/Viva-City/live_cclone_saad/ol_custom_amazon/model/custom_amazon.py)
+- it appended `request.httprequest.environ['REMOTE_ADDR']` during `mail.message.create`
+- when run through Odoo shell there is no active HTTP request
+- commit failed with `RuntimeError: object unbound`
+
+We patched the file to safely handle non-HTTP execution by checking for a request before trying to read the remote IP.
+
+After that patch:
+- move `204742` was completed successfully
+
+Final verification:
+- there are now `0` remaining Jan-Apr Amazon outbound customer-delivery moves in `assigned`, `confirmed`, or `waiting`
+
+## 11. February confirmed customer-return-style moves
+
+Separately from outbound deliveries, we investigated the February "Waiting Availability" / `confirmed` stock moves.
+
+We created:
+- [report_feb_confirmed_return_moves.py](/mnt/projects/Viva-City/live_cclone_saad/plan-md/report_feb_confirmed_return_moves.py)
+- [feb_confirmed_return_moves_report_20260519T122759Z.csv](/mnt/projects/Viva-City/live_cclone_saad/plan-md/feb_confirmed_return_moves_report_20260519T122759Z.csv)
+- [feb_confirmed_return_moves_report_20260519T122759Z.md](/mnt/projects/Viva-City/live_cclone_saad/plan-md/feb_confirmed_return_moves_report_20260519T122759Z.md)
+
+Conclusion:
+- there were `130` February return-style moves from `Partners/Customers` to `Infin` (a `view` location)
+- `116` were tied to posted refunds
+- `14` were tied to draft refunds
+- recommendation:
+  - cancel the `116` posted-refund artifacts
+  - ignore / hold the `14` draft-refund artifacts until refund flow is reviewed
+  - do not complete them as-is
+
+## 12. Stock journal audit
+
+We audited stock moves against valuation/accounting entries:
+- [stock_move_journal_audit_report_20260518T134705Z.md](/mnt/projects/Viva-City/live_cclone_saad/plan-md/stock_move_journal_audit_report_20260518T134705Z.md)
+- [stock_move_journal_state_summary_20260518T134705Z.csv](/mnt/projects/Viva-City/live_cclone_saad/plan-md/stock_move_journal_state_summary_20260518T134705Z.csv)
+- [stock_move_missing_expected_journals_20260518T134705Z.csv](/mnt/projects/Viva-City/live_cclone_saad/plan-md/stock_move_missing_expected_journals_20260518T134705Z.csv)
+- [stock_move_multiple_journals_20260518T134705Z.csv](/mnt/projects/Viva-City/live_cclone_saad/plan-md/stock_move_multiple_journals_20260518T134705Z.csv)
+
+Conclusion:
+- we did not find a population of done stock moves that should have journals but did not
+- multiple-journal cases were mainly explained by negative inventory revaluations and landed costs
+
+## 13. COGS composition and variance analysis
+
+We built a month-wise COGS composition report:
+- [cogs_components_by_month_20260518T140523Z.md](/mnt/projects/Viva-City/live_cclone_saad/plan-md/cogs_components_by_month_20260518T140523Z.md)
+- [cogs_components_by_month_20260518T140523Z.csv](/mnt/projects/Viva-City/live_cclone_saad/plan-md/cogs_components_by_month_20260518T140523Z.csv)
+
+After the Jan-Apr completion cleanup, the main COGS totals were:
+- `2026-01`: `46,615.84`
+- `2026-02`: `15,711.29`
+- `2026-03`: `14,685.51`
+- `2026-04`: `41,356.82`
+
+Important conclusion:
+- February and March remained low **even after** clearing the open-move backlog
+- the gap was no longer coming from open moves, landed costs, negative revaluations, or manual entries
+- it was now concentrated in **SKU-level cost flow**
+
+## 14. SKU-level sales vs COGS analysis
+
+We produced multiple SKU-level analyses:
+- [sku_sales_vs_cogs_report_feb_mar_20260518T150309Z.md](/mnt/projects/Viva-City/live_cclone_saad/plan-md/sku_sales_vs_cogs_report_feb_mar_20260518T150309Z.md)
+- [sku_sales_vs_cogs_accounting_month_report_feb_mar_20260518T155143Z.md](/mnt/projects/Viva-City/live_cclone_saad/plan-md/sku_sales_vs_cogs_accounting_month_report_feb_mar_20260518T155143Z.md)
+- [ranked_root_cause_skus_20260518T155725Z.md](/mnt/projects/Viva-City/live_cclone_saad/plan-md/ranked_root_cause_skus_20260518T155725Z.md)
+
+Key finding:
+- many top-selling SKUs in February and March still had extremely low same-month COGS
+
+Examples from February:
+- `TW-GRY-KTH-6`: sales `20,199.62`, COGS `249.91`, `1.24%`
+- `WSH-CLT-WHT-12`: sales `8,956.99`, COGS `137.34`, `1.53%`
+- `LUX-PK2-TWL-WHT`: sales `4,358.31`, COGS `110.94`, `2.55%`
+- `TWL-HND-DGY-6`: sales `3,071.36`, COGS `16.88`, `0.55%`
+
+Examples from March:
+- `TW-GRY-KTH-6`: sales `19,931.32`, COGS `14.34`, `0.07%`
+- `WSH-CLT-WHT-12`: sales `12,149.41`, COGS `0.00`
+- `LUX-PK2-TWL-WHT`: sales `5,773.05`, COGS `0.00`
+- `TW-GRN-KTH-6`: sales `4,104.75`, COGS `5.08`, `0.12%`
+
+This was the final conclusion on the remaining COGS variance:
+- the main driver is still SKU-level cost flow / valuation history for specific products
+- not the open-move backlog anymore
+
+## 15. Stock history / negative inventory tracing
+
+We also traced flagged SKUs through:
+- stock moves
+- valuation layers
+- quants
+- invoice timing
+
+Files:
+- [flagged_sku_trace_report_20260518T154023Z.md](/mnt/projects/Viva-City/live_cclone_saad/plan-md/flagged_sku_trace_report_20260518T154023Z.md)
+- [flagged_sku_trace_summary_20260518T154023Z.csv](/mnt/projects/Viva-City/live_cclone_saad/plan-md/flagged_sku_trace_summary_20260518T154023Z.csv)
+- [flagged_sku_trace_quants_20260518T154023Z.csv](/mnt/projects/Viva-City/live_cclone_saad/plan-md/flagged_sku_trace_quants_20260518T154023Z.csv)
+- [flagged_sku_trace_valuation_layers_20260518T154023Z.csv](/mnt/projects/Viva-City/live_cclone_saad/plan-md/flagged_sku_trace_valuation_layers_20260518T154023Z.csv)
+
+Supporting conclusion:
+- problematic SKUs were strongly associated with negative inventory history
+- especially large negative balances in `Virtual Locations/Inventory adjustment`
+
+## 16. Database changes actually performed
+
+The activities that changed data in `viva_live_copy_FC` were:
+
+- creation of saved filter records in `ir.filters`
+- completion of blocked/outstanding Amazon outbound moves
+- stock top-up adjustments used to unlock blocked moves
+- backdated delivery-side stock valuation/accounting entries into Jan-Apr months
+
+Important accounting note:
+- delivery valuation/accounting entries were posted into the original accounting month
+- inventory top-up adjustments used to unlock blocked stock were posted with the current execution date
+
+## 17. Code changes actually performed
+
+Permanent source-code change made in the repo:
+- [ol_custom_amazon/model/custom_amazon.py](/mnt/projects/Viva-City/live_cclone_saad/ol_custom_amazon/model/custom_amazon.py)
+
+Purpose of the patch:
+- prevent `RuntimeError: object unbound` when custom chatter/IP logging runs outside an HTTP request context
+- this was necessary to allow shell-based stock completion commits to succeed
+
+Local utility / analysis scripts added under `plan-md/`:
+- `complete_open_month_with_stock_topup.py`
+- `complete_single_blocked_move.py`
+- `report_feb_confirmed_return_moves.py`
+- `report_jan_apr_blocked_stock_corrections.py`
+- and multiple audit/report scripts already listed above
+
+## 18. Final status at handoff
+
+Completed:
+- Jan-Apr Amazon outbound backlog cleared
+- blocked-move COGS recovered into original accounting months
+- final April holdout resolved
+- return-style confirmed February artifacts analyzed and classified
+- remaining COGS variance narrowed to SKU-level valuation/cost-flow behavior
+
+Still unresolved from a business/accounting perspective:
+- February and March COGS remain materially low versus January and April
+- root cause now points to specific SKU valuation history / negative inventory effects, not open moves
+- draft invoice / refund-flow problems remain a separate issue outside the outbound move cleanup
+
+## 19. Best next steps
+
+Recommended next steps from here:
+- build a focused repair shortlist for the February/March low-COGS SKUs
+- inspect valuation history and inventory adjustment history for those specific products
+- separately clean the February return-style `confirmed` artifacts
+- separately repair the Amazon invoice / draft invoice logic in `ol_uploader`
