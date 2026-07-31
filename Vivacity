@@ -1,335 +1,233 @@
-# Final Activity Report
+# TeenEagle accounting synchronisation guide
 
-Scope of work:
-- Database: `viva_live_copy_FC`
-- Company: `Infinitee Xclusives Ltd.` (`res_company.id = 9`)
-- Environment: local DevEnv only, no GitLab push, no production impact
+## Purpose
 
-## 1. Initial scoping and confirmation
+This guide explains the accounting synchronisation process between:
 
-We confirmed the correct company scope and worked only on `Infinitee Xclusives Ltd.` inside `viva_live_copy_FC`.
+- **Portal / Odoo 18**: the operational system where TeenEagle records are created and maintained.
+- **Enterprise / Odoo 17**: the accounting system that receives the accounting records, supports bank-statement reconciliation, and returns reconciliation results to Odoo 18.
 
-We identified two different companies early on:
-- `INFINITEE EXCLUSIVES B.V.` (`company_id = 11`) was not our target
-- `Infinitee Xclusives Ltd` (`company_id = 9`) was the correct scope for all later analysis
+This is a read-only technical review of the installed custom addons. It describes the implemented workflow and the expected operating model; it is not a runtime test and does not change either Odoo system.
 
-## 2. Amazon sales / stock process investigation
+## Executive summary
 
-We traced the Amazon sales flow and confirmed:
-- FBA-style Amazon orders in this database create direct `stock.move` records, not `stock.picking`
-- this behavior comes from Odoo Amazon flow, not from a normal warehouse delivery flow
-- journal entries for stock valuation are expected only when valuation rules apply
+TeenEagle users work in Odoo 18. When an accounting or master record is created, posted, changed, cancelled, reset, deleted, or reconciled, the Odoo 18 customisation creates a queue line. A scheduled process sends batches of queue lines to Odoo 17. Odoo 17 creates or updates the corresponding accounting record and returns the Enterprise IDs and processing result. Odoo 18 stores those IDs and marks the queue line as successful or failed.
 
-Key conclusion from the early phase:
-- absence of a `stock.picking` for many Amazon orders was normal in this setup
-- the real issue was not "missing pickings" but whether moves reached `done` and whether valuation/accounting followed
+The intended operating rule is:
 
-## 3. Full system audit
+> **Do all normal accounting-entry work in Odoo 18. Do not recreate or edit the synchronised records manually in Odoo 17. In Odoo 17, the TeenEagle accounting team only needs to reconcile bank statement lines and use the accounting reports.**
 
-We ran a broad audit across sales, invoices, stock moves, valuation, and accounting.
+After bank reconciliation in Odoo 17, the Enterprise side sends an incoming queue back to Odoo 18. Odoo 18 applies that queue by creating or removing a local bank-reconciliation marker against the related payment. This makes the payment’s received/reconciled status visible in Odoo 18 without requiring the user to reconcile the same bank statement again there.
 
-Main outputs:
-- [full_system_audit_report_20260516T130203Z.md](/mnt/projects/Viva-City/live_cclone_saad/plan-md/full_system_audit_report_20260516T130203Z.md)
-- [full_audit_monthly_financials_20260516T130203Z.csv](/mnt/projects/Viva-City/live_cclone_saad/plan-md/full_audit_monthly_financials_20260516T130203Z.csv)
-- [full_audit_open_moves_by_month_20260516T130203Z.csv](/mnt/projects/Viva-City/live_cclone_saad/plan-md/full_audit_open_moves_by_month_20260516T130203Z.csv)
-- [full_audit_draft_invoice_issues_20260516T130203Z.csv](/mnt/projects/Viva-City/live_cclone_saad/plan-md/full_audit_draft_invoice_issues_20260516T130203Z.csv)
-- [full_audit_negative_quants_20260516T130203Z.csv](/mnt/projects/Viva-City/live_cclone_saad/plan-md/full_audit_negative_quants_20260516T130203Z.csv)
+## What is synchronised
 
-Main findings from that audit:
-- very large Amazon outbound move backlog not reaching `done`
-- major draft invoice problems in the Amazon invoice flow
-- negative inventory history and negative quants in key locations
-- month-wise sales and COGS mismatches
+### Accounting documents
 
-## 4. Open Amazon outbound move analysis
+The main accounting queue supports these business actions:
 
-We isolated the Amazon customer-delivery backlog and exported it:
-- [infinitee_open_amazon_customer_delivery_moves.csv](/mnt/projects/Viva-City/live_cclone_saad/plan-md/infinitee_open_amazon_customer_delivery_moves.csv)
+| Record or event | Odoo 18 action that creates the queue line | Queue type |
+|---|---|---|
+| Customer invoice, vendor bill, customer refund/credit note | Post a new record | `create` followed by the posting action where required |
+| Existing synchronised invoice/bill/refund | Edit synchronised fields after resetting to draft | `write` |
+| Existing record | Post, cancel, or reset to draft | `action` |
+| Existing record | Delete | `unlink` |
+| Payment | Post, cancel, reset to draft, mark sent, or unmark sent | `create` or `action` |
+| Payment changes | Internal synchronised write | `write` |
+| Invoice/payment matching | Create a partial reconciliation | `reconcile` |
+| Invoice/payment matching removed | Delete a partial reconciliation | `unreconcile` |
+| Reverse document | Reverse/action payload where the originating record is already mapped | `reverse` or action flow, depending on the calling operation |
 
-At that stage we identified:
-- `10,111` open Amazon storable customer-delivery moves
-- the backlog was concentrated in January through April 2026
-- these open moves were preventing COGS posting in a non-Anglo-Saxon stock-accounting flow
+The normal invoice move types handled by the invoice posting flow are:
 
-We then built a planning comparison:
-- [infinitee_pnl_current_vs_projected_open_moves.csv](/mnt/projects/Viva-City/live_cclone_saad/plan-md/infinitee_pnl_current_vs_projected_open_moves.csv)
+- `out_invoice` — customer invoice
+- `out_refund` — customer credit note/refund
+- `in_invoice` — vendor bill
 
-That file compared:
-- current month-wise P&L / COGS
-- projected additional COGS if open outbound moves were completed into their original accounting period
+The queue status is shown on invoices and payments. The available statuses are **Empty**, **Draft**, **In Process**, **Sync**, and **Failed**. A queue line also retains its payload, Enterprise response payload, Enterprise queue-line ID, action date, and error text.
 
-## 5. Safe pilot scripts for completing backlog
-
-We created reusable local scripts for controlled stock completion:
-- [pilot_complete_open_amazon_moves.py](/mnt/projects/Viva-City/live_cclone_saad/plan-md/pilot_complete_open_amazon_moves.py)
-- [pilot_complete_open_amazon_moves_safe.py](/mnt/projects/Viva-City/live_cclone_saad/plan-md/pilot_complete_open_amazon_moves_safe.py)
-- [pilot_complete_open_amazon_moves_README.md](/mnt/projects/Viva-City/live_cclone_saad/plan-md/pilot_complete_open_amazon_moves_README.md)
-
-The safe runner:
-- filtered eligible moves
-- skipped moves that would push stock negative
-- posted stock valuation using each move's original accounting date
-- produced CSV and summary artifacts for each month
+### Supporting master data
 
-## 6. Month-by-month backlog recovery before stock top-up
-
-We first ran a safe pass without forcing stock corrections.
-
-Results at that stage:
-- April 2026: most moves recovered, but a blocked remainder remained
-- March 2026: majority recovered, some blocked by shortage
-- February 2026: majority recovered, some blocked by shortage
-- January 2026: significant recovery, still many blocked
-
-Artifacts from those runs include:
-- `pilot_safe_open_amazon_moves_2026-01_*`
-- `pilot_safe_open_amazon_moves_2026-02_*`
-- `pilot_safe_open_amazon_moves_2026-03_*`
-- `pilot_safe_open_amazon_moves_2026-04_*`
+Accounting documents carry nested references to the supporting records needed on Odoo 17. The synchronisation stores the Odoo 17 identifier on Odoo 18 so later documents reuse the existing record rather than creating a duplicate.
 
-These runs confirmed:
-- the remaining blocked population was mostly genuine stock-shortage / negative-stock prevention
-- the blocker SKUs were concentrated in `Infin/Amazon`
+The reviewed implementation covers:
 
-## 7. Blocked-stock correction analysis
+- contacts/partners and their TeenEagle relationship hierarchy;
+- users and their partner records;
+- CRM sales teams;
+- journals and payment-method-line mappings;
+- chart-of-account records;
+- tax groups and taxes;
+- product categories;
+- product templates, variants, attributes, attribute values, units of measure, and taxes.
 
-We built a combined Jan-Apr correction set for the blocked remainder:
-- [jan_apr_blocked_stock_corrections_report_20260519T123827Z.md](/mnt/projects/Viva-City/live_cclone_saad/plan-md/jan_apr_blocked_stock_corrections_report_20260519T123827Z.md)
-- [jan_apr_blocked_stock_corrections_summary_20260519T123827Z.csv](/mnt/projects/Viva-City/live_cclone_saad/plan-md/jan_apr_blocked_stock_corrections_summary_20260519T123827Z.csv)
-- [jan_apr_blocked_stock_corrections_detail_20260519T123827Z.csv](/mnt/projects/Viva-City/live_cclone_saad/plan-md/jan_apr_blocked_stock_corrections_detail_20260519T123827Z.csv)
+The important distinction is that journals and payment methods are **mapping prerequisites**. The Odoo 18 journal form exposes an Enterprise Journal ID and Enterprise payment-method-line IDs. Invoice and payment payloads use those IDs. A journal that is not mapped is not a valid source for a reliable accounting synchronisation.
 
-This told us exactly:
-- which SKUs were still blocking completion
-- from which location
-- the open quantity involved
-- the projected blocked COGS
-
-Top shortage SKUs were:
-- `LUX-PK2-TWL-WHT`
-- `LUX-PK2-TWL-DGY`
-- `TW-BLK-KTH-6`
-- `LUX-PK2-TWL-LGY`
-- `TWL-HND-PUR-6`
-
-## 8. Targeted single-move recovery tests
-
-Before doing a full month stock-top-up pass, we tested the correction pattern on individual blocked January moves.
-
-We created:
-- [complete_single_blocked_move.py](/mnt/projects/Viva-City/live_cclone_saad/plan-md/complete_single_blocked_move.py)
-
-We then completed:
-- move `105047`, sale order `S93274`, SKU `LUX-PK2-TWL-WHT`, month `2026-01`
-- move `105048`, sale order `S93275`, SKU `LUX-PK2-TWL-LGY`, month `2026-01`
-
-For each test:
-- we added a minimal stock top-up
-- completed the move
-- confirmed that the delivery-side stock journal posted back into January
-- confirmed the unlocking inventory adjustment posted with the current date
-
-This validated the method before running at month scale.
-
-## 9. Full Jan-Apr stock-top-up completion run
-
-We then built and ran a month-level recovery runner:
-- [complete_open_month_with_stock_topup.py](/mnt/projects/Viva-City/live_cclone_saad/plan-md/complete_open_month_with_stock_topup.py)
-
-This runner:
-- grouped remaining open moves by product/location for a given month
-- created stock top-ups in the source location
-- marked move / move lines as picked when needed
-- completed each move
-- forced stock valuation accounting back into the move's original accounting month
-- wrote top-up and result CSVs per month
-
-Outputs:
-- [month_completion_summary_2026-01_stock_topup_execute_20260519T130953Z.txt](/mnt/projects/Viva-City/live_cclone_saad/plan-md/month_completion_summary_2026-01_stock_topup_execute_20260519T130953Z.txt)
-- [month_completion_summary_2026-02_stock_topup_execute_20260519T131246Z.txt](/mnt/projects/Viva-City/live_cclone_saad/plan-md/month_completion_summary_2026-02_stock_topup_execute_20260519T131246Z.txt)
-- [month_completion_summary_2026-03_stock_topup_execute_20260519T131313Z.txt](/mnt/projects/Viva-City/live_cclone_saad/plan-md/month_completion_summary_2026-03_stock_topup_execute_20260519T131313Z.txt)
-- [month_completion_summary_2026-04_stock_topup_execute_20260519T131332Z.txt](/mnt/projects/Viva-City/live_cclone_saad/plan-md/month_completion_summary_2026-04_stock_topup_execute_20260519T131332Z.txt)
-
-Month results:
-- January 2026: `443` moves done, `0` blocked
-- February 2026: `77` moves done, `0` blocked
-- March 2026: `58` moves done, `0` blocked
-- April 2026: `618` moves done, `1` blocked in the main runner
-
-Additional top-up detail files:
-- `month_stock_topups_2026-01_*`
-- `month_stock_topups_2026-02_*`
-- `month_stock_topups_2026-03_*`
-- `month_stock_topups_2026-04_*`
-
-Additional move result files:
-- `month_completion_results_2026-01_*`
-- `month_completion_results_2026-02_*`
-- `month_completion_results_2026-03_*`
-- `month_completion_results_2026-04_*`
-
-## 10. Final April holdout and code-level bug fix
-
-The only remaining open move after the month runner was:
-- move `204742`
-- sale order `S141700`
-- SKU `TW-GRY-KTH-6`
-- source `Infin/Stock`
-- picking `Infin/OUT/00032`
-
-This was not a stock-shortage issue.
-
-Root cause:
-- a custom override in [ol_custom_amazon/model/custom_amazon.py](/mnt/projects/Viva-City/live_cclone_saad/ol_custom_amazon/model/custom_amazon.py)
-- it appended `request.httprequest.environ['REMOTE_ADDR']` during `mail.message.create`
-- when run through Odoo shell there is no active HTTP request
-- commit failed with `RuntimeError: object unbound`
-
-We patched the file to safely handle non-HTTP execution by checking for a request before trying to read the remote IP.
-
-After that patch:
-- move `204742` was completed successfully
-
-Final verification:
-- there are now `0` remaining Jan-Apr Amazon outbound customer-delivery moves in `assigned`, `confirmed`, or `waiting`
-
-## 11. February confirmed customer-return-style moves
-
-Separately from outbound deliveries, we investigated the February "Waiting Availability" / `confirmed` stock moves.
-
-We created:
-- [report_feb_confirmed_return_moves.py](/mnt/projects/Viva-City/live_cclone_saad/plan-md/report_feb_confirmed_return_moves.py)
-- [feb_confirmed_return_moves_report_20260519T122759Z.csv](/mnt/projects/Viva-City/live_cclone_saad/plan-md/feb_confirmed_return_moves_report_20260519T122759Z.csv)
-- [feb_confirmed_return_moves_report_20260519T122759Z.md](/mnt/projects/Viva-City/live_cclone_saad/plan-md/feb_confirmed_return_moves_report_20260519T122759Z.md)
-
-Conclusion:
-- there were `130` February return-style moves from `Partners/Customers` to `Infin` (a `view` location)
-- `116` were tied to posted refunds
-- `14` were tied to draft refunds
-- recommendation:
-  - cancel the `116` posted-refund artifacts
-  - ignore / hold the `14` draft-refund artifacts until refund flow is reviewed
-  - do not complete them as-is
-
-## 12. Stock journal audit
-
-We audited stock moves against valuation/accounting entries:
-- [stock_move_journal_audit_report_20260518T134705Z.md](/mnt/projects/Viva-City/live_cclone_saad/plan-md/stock_move_journal_audit_report_20260518T134705Z.md)
-- [stock_move_journal_state_summary_20260518T134705Z.csv](/mnt/projects/Viva-City/live_cclone_saad/plan-md/stock_move_journal_state_summary_20260518T134705Z.csv)
-- [stock_move_missing_expected_journals_20260518T134705Z.csv](/mnt/projects/Viva-City/live_cclone_saad/plan-md/stock_move_missing_expected_journals_20260518T134705Z.csv)
-- [stock_move_multiple_journals_20260518T134705Z.csv](/mnt/projects/Viva-City/live_cclone_saad/plan-md/stock_move_multiple_journals_20260518T134705Z.csv)
-
-Conclusion:
-- we did not find a population of done stock moves that should have journals but did not
-- multiple-journal cases were mainly explained by negative inventory revaluations and landed costs
-
-## 13. COGS composition and variance analysis
-
-We built a month-wise COGS composition report:
-- [cogs_components_by_month_20260518T140523Z.md](/mnt/projects/Viva-City/live_cclone_saad/plan-md/cogs_components_by_month_20260518T140523Z.md)
-- [cogs_components_by_month_20260518T140523Z.csv](/mnt/projects/Viva-City/live_cclone_saad/plan-md/cogs_components_by_month_20260518T140523Z.csv)
-
-After the Jan-Apr completion cleanup, the main COGS totals were:
-- `2026-01`: `46,615.84`
-- `2026-02`: `15,711.29`
-- `2026-03`: `14,685.51`
-- `2026-04`: `41,356.82`
-
-Important conclusion:
-- February and March remained low **even after** clearing the open-move backlog
-- the gap was no longer coming from open moves, landed costs, negative revaluations, or manual entries
-- it was now concentrated in **SKU-level cost flow**
-
-## 14. SKU-level sales vs COGS analysis
-
-We produced multiple SKU-level analyses:
-- [sku_sales_vs_cogs_report_feb_mar_20260518T150309Z.md](/mnt/projects/Viva-City/live_cclone_saad/plan-md/sku_sales_vs_cogs_report_feb_mar_20260518T150309Z.md)
-- [sku_sales_vs_cogs_accounting_month_report_feb_mar_20260518T155143Z.md](/mnt/projects/Viva-City/live_cclone_saad/plan-md/sku_sales_vs_cogs_accounting_month_report_feb_mar_20260518T155143Z.md)
-- [ranked_root_cause_skus_20260518T155725Z.md](/mnt/projects/Viva-City/live_cclone_saad/plan-md/ranked_root_cause_skus_20260518T155725Z.md)
-
-Key finding:
-- many top-selling SKUs in February and March still had extremely low same-month COGS
-
-Examples from February:
-- `TW-GRY-KTH-6`: sales `20,199.62`, COGS `249.91`, `1.24%`
-- `WSH-CLT-WHT-12`: sales `8,956.99`, COGS `137.34`, `1.53%`
-- `LUX-PK2-TWL-WHT`: sales `4,358.31`, COGS `110.94`, `2.55%`
-- `TWL-HND-DGY-6`: sales `3,071.36`, COGS `16.88`, `0.55%`
-
-Examples from March:
-- `TW-GRY-KTH-6`: sales `19,931.32`, COGS `14.34`, `0.07%`
-- `WSH-CLT-WHT-12`: sales `12,149.41`, COGS `0.00`
-- `LUX-PK2-TWL-WHT`: sales `5,773.05`, COGS `0.00`
-- `TW-GRN-KTH-6`: sales `4,104.75`, COGS `5.08`, `0.12%`
-
-This was the final conclusion on the remaining COGS variance:
-- the main driver is still SKU-level cost flow / valuation history for specific products
-- not the open-move backlog anymore
-
-## 15. Stock history / negative inventory tracing
-
-We also traced flagged SKUs through:
-- stock moves
-- valuation layers
-- quants
-- invoice timing
-
-Files:
-- [flagged_sku_trace_report_20260518T154023Z.md](/mnt/projects/Viva-City/live_cclone_saad/plan-md/flagged_sku_trace_report_20260518T154023Z.md)
-- [flagged_sku_trace_summary_20260518T154023Z.csv](/mnt/projects/Viva-City/live_cclone_saad/plan-md/flagged_sku_trace_summary_20260518T154023Z.csv)
-- [flagged_sku_trace_quants_20260518T154023Z.csv](/mnt/projects/Viva-City/live_cclone_saad/plan-md/flagged_sku_trace_quants_20260518T154023Z.csv)
-- [flagged_sku_trace_valuation_layers_20260518T154023Z.csv](/mnt/projects/Viva-City/live_cclone_saad/plan-md/flagged_sku_trace_valuation_layers_20260518T154023Z.csv)
-
-Supporting conclusion:
-- problematic SKUs were strongly associated with negative inventory history
-- especially large negative balances in `Virtual Locations/Inventory adjustment`
-
-## 16. Database changes actually performed
-
-The activities that changed data in `viva_live_copy_FC` were:
-
-- creation of saved filter records in `ir.filters`
-- completion of blocked/outstanding Amazon outbound moves
-- stock top-up adjustments used to unlock blocked moves
-- backdated delivery-side stock valuation/accounting entries into Jan-Apr months
-
-Important accounting note:
-- delivery valuation/accounting entries were posted into the original accounting month
-- inventory top-up adjustments used to unlock blocked stock were posted with the current execution date
-
-## 17. Code changes actually performed
-
-Permanent source-code change made in the repo:
-- [ol_custom_amazon/model/custom_amazon.py](/mnt/projects/Viva-City/live_cclone_saad/ol_custom_amazon/model/custom_amazon.py)
-
-Purpose of the patch:
-- prevent `RuntimeError: object unbound` when custom chatter/IP logging runs outside an HTTP request context
-- this was necessary to allow shell-based stock completion commits to succeed
-
-Local utility / analysis scripts added under `plan-md/`:
-- `complete_open_month_with_stock_topup.py`
-- `complete_single_blocked_move.py`
-- `report_feb_confirmed_return_moves.py`
-- `report_jan_apr_blocked_stock_corrections.py`
-- and multiple audit/report scripts already listed above
-
-## 18. Final status at handoff
-
-Completed:
-- Jan-Apr Amazon outbound backlog cleared
-- blocked-move COGS recovered into original accounting months
-- final April holdout resolved
-- return-style confirmed February artifacts analyzed and classified
-- remaining COGS variance narrowed to SKU-level valuation/cost-flow behavior
-
-Still unresolved from a business/accounting perspective:
-- February and March COGS remain materially low versus January and April
-- root cause now points to specific SKU valuation history / negative inventory effects, not open moves
-- draft invoice / refund-flow problems remain a separate issue outside the outbound move cleanup
-
-## 19. Best next steps
-
-Recommended next steps from here:
-- build a focused repair shortlist for the February/March low-COGS SKUs
-- inspect valuation history and inventory adjustment history for those specific products
-- separately clean the February return-style `confirmed` artifacts
-- separately repair the Amazon invoice / draft invoice logic in `ol_uploader`
+## End-to-end flow
+
+```text
+User works in Odoo 18
+        |
+        v
+Odoo 18 record event creates a queue line
+        |
+        v
+Outgoing accounting queue (max. 40 lines per batch)
+        |
+        v
+Scheduled job sends draft queues to the Odoo 17 integration endpoint
+        |
+        v
+Odoo 17 creates/updates/posts the accounting records
+        |
+        v
+Odoo 17 returns Enterprise queue IDs and line results
+        |
+        v
+Odoo 18 stores mappings and marks each line success/failed
+        |
+        v
+Accounting team reconciles bank statement lines in Odoo 17
+        |
+        v
+Odoo 17 sends an incoming reconciliation queue to Odoo 18
+        |
+        v
+Odoo 18 records or removes the linked bank-reconciliation marker
+```
+
+## Outgoing queue processing
+
+### Queue creation
+
+The customisations hook into the Odoo 18 model events rather than requiring a separate export procedure. Examples:
+
+- creating a contact creates a `create` queue line;
+- changing a synchronised contact field creates a `write` queue line;
+- posting an invoice creates the invoice payload and/or an action payload;
+- posting a payment creates a payment payload or a posting action payload;
+- changing an invoice line creates a move-line queue entry;
+- creating or removing a partial reconciliation creates a reconciliation queue line.
+
+Queue lines are grouped into `queue.account.move` batches. The grouping query selects an active draft queue with fewer than 40 lines and uses row locking so concurrent workers do not select the same queue. If no suitable queue exists, a new one is created.
+
+### Automatic transmission
+
+Two scheduled jobs are installed in Odoo 18:
+
+1. **Sync Invoices and Payment** runs every 30 minutes and processes up to five draft outgoing accounting queues.
+2. **Sync Incoming Queues** runs every 30 minutes and processes up to five draft incoming queues returned from Odoo 17.
+
+The outgoing job logs in to the configured TeenEagle URL, obtains a bearer token, sends the queue payload, and stores the Enterprise queue ID and Enterprise queue-line IDs. The queue-line state initially becomes **In Process**; the later callback/settlement response changes it to **Success**, **Failed**, or **Bypass**.
+
+The queue form also exposes a **Sync** button. This is an operational retry/manual trigger for an authorised administrator when a queue needs attention; it is not part of the normal daily process.
+
+### Success and failure
+
+A queue is effectively complete when all non-bypassed lines are successful. If any line fails, the queue is shown as partially synchronised. On a failed line, users should inspect:
+
+1. the related invoice, bill, refund, payment, contact, or product;
+2. the queue-line **Error** field;
+3. the **Enterprise Payload Response**;
+4. the mapping fields on the related journal, tax, product, contact, or accounting record.
+
+Do not create a replacement record in Odoo 17 as a first response to a failed line. Correct the source or mapping issue in Odoo 18 and have the integration owner retry/reprocess the queue according to the support procedure.
+
+## How invoices, bills, refunds, and payments behave
+
+### Invoices, bills, and refunds
+
+The Odoo 18 payload includes the partner, move type, dates, journal mapping, currency, narration, user/team references, sale-order reference, reversal reference, and invoice lines. Each invoice line includes its product, quantity, description, unit price, discount, taxes, and the Odoo 18 line identifier.
+
+On Odoo 17, the integration validates the journal, invoice date, partner TeenEagle ID, product references, taxes, and invoice lines before creating and posting a customer invoice through the receiver API. The Enterprise queue processor is outside this repository, so the exact Odoo 17 queue screen and its internal create/write implementation must be confirmed with the Enterprise-side deployment owner.
+
+When an already mapped record is changed, Odoo 18 sends the Enterprise ID and the current values rather than treating it as a new business record. For a posted synchronised invoice, the Odoo 18 customisation requires the user to reset it to draft before changing synchronised business fields. This is intended to keep the Odoo 18 and Odoo 17 entries aligned.
+
+### Payments
+
+Payment payloads include the partner, payment type, amount, date, journal mapping, currency, payment-method-line mapping, reference, and Odoo 18 payment ID. Posting, cancellation, draft reset, and sent/un-sent changes are propagated as action queue lines when the payment is already mapped.
+
+The payment model also stores Odoo 17 bank-statement reconciliation markers. The computed `is_received` value becomes true when the amounts of the returned reconciliation markers meet or exceed the payment amount.
+
+### Reconciliation and unreconciliation
+
+When a payment is matched with an invoice/bill/refund in Odoo 18, the partial-reconciliation hook creates a `reconcile` queue line containing the Odoo 18/17 invoice and payment identifiers. Removing that matching creates an `unreconcile` queue line.
+
+The usual bank workflow is different: the accounting team reconciles the bank statement line in Odoo 17. The Enterprise side then sends an incoming queue line of type `bank_reconcile` to Odoo 18. Odoo 18 parses the returned payload and creates an `ent.reconciled.bank.statement` marker against the matching payment. If the bank reconciliation is removed in Odoo 17, a `bank_unreconcile` line removes the marker in Odoo 18.
+
+## What TeenEagle users need to do
+
+### In Odoo 18
+
+Users should:
+
+1. Create and maintain contacts, products, journals, taxes, invoices, bills, credit notes/refunds, and payments in the normal Odoo 18 workflow.
+2. Use the correct mapped journal and payment method when posting accounting documents.
+3. For a posted synchronised invoice or bill that must change, reset it to draft first, make the correction in Odoo 18, and repost it.
+4. Allow the scheduled queue process to transmit the changes.
+5. Check the record’s **Sync Status** when investigating whether a change has reached Odoo 17.
+6. Escalate a **Failed**, persistently **Draft**, or **In Process** queue with the record, queue ID, line ID, error text, and approximate time of the action.
+
+### In Odoo 17 Enterprise
+
+Users should:
+
+1. View the synchronised accounting records and use the accounting reports.
+2. Reconcile bank statement lines.
+3. Correct or undo bank reconciliation through the normal bank-reconciliation workflow when necessary, allowing the return queue to update Odoo 18.
+
+Users should **not**:
+
+- manually recreate invoices, bills, refunds, credit notes, or payments that originated in Odoo 18;
+- manually edit the synchronised accounting entries to “fix” a mismatch;
+- manually create duplicate contacts, products, taxes, journals, or chart-of-account records for a queue that is still processing;
+- reconcile the same bank statement in both systems;
+- change Enterprise mapping IDs or queue payloads without the integration owner.
+
+## Monitoring checklist
+
+The normal daily check is small:
+
+- In Odoo 18, review outgoing queues for **Partially Sync** or failed lines.
+- Review invoice/payment **Sync Status** badges where a business user expects a recent change to be available in Odoo 17.
+- In Odoo 17, reconcile bank statement lines and verify the accounting reports.
+- In Odoo 18, verify that returned incoming queues are no longer in **Draft** and that the payment’s bank-statement marker is present when appropriate.
+
+The queue screens are available under the custom **TeenEagle Sync Sender** menu. The outgoing queue form shows line type, payload, processing state, related move/payment, Enterprise queue-line ID, response payload, and error. The incoming queue form shows bank-reconcile/bank-unreconcile lines, payment, Enterprise queue-line ID, returned payload, and error.
+
+## Troubleshooting boundaries
+
+| Symptom | Likely area | First read-only check |
+|---|---|---|
+| Invoice has no Enterprise ID / no sync status progress | Source event or unmapped journal | Invoice journal mapping and related outgoing queue line |
+| Queue remains Draft | Scheduler, connection, or queue selection | Queue state, endpoint, line payload, and scheduled-job health |
+| Queue is In Process for a long time | Odoo 17 processing or response path | Enterprise queue ID/line ID and integration logs |
+| Queue line is Failed | Validation or mapping mismatch | Queue-line Error and Enterprise response payload |
+| Payment is not marked received in Odoo 18 | Return queue or bank-reconciliation payload | Incoming queue line, payment ID, and `ent.reconciled.bank.statement` marker |
+| Duplicate or missing master record | Missing/incorrect mapping | Enterprise IDs on the partner, product, tax, account, category, journal, or payment method |
+
+Only the bank reconciliation is an expected user action on the Enterprise side. Other discrepancies should be escalated with evidence rather than fixed by manually editing Odoo 17.
+
+## Implementation evidence and scope note
+
+This guide was prepared from the following custom addons in the production working tree:
+
+- `teeneagle_sync_sender` — Odoo 18 queue creation, payload preparation, scheduled processing, mapping storage, reconciliation return handling, and user-facing queue views.
+- `teeneagle_sync_receiver` — the Odoo 17 HTTP receiver APIs present in this repository for invoice, payment, and contact creation, plus bearer authentication.
+
+The repository does **not** include the Enterprise-side queue processor that owns the Odoo 17 queue tables, the exact outgoing queue endpoint implementation, or the Odoo 17 bank-reconciliation outbound job. Those parts are treated here as the integration contract described by the Odoo 18 incoming/outgoing queue models. Before publishing screenshots or exact Odoo 17 menu names, the Enterprise deployment should be reviewed separately.
+
+## Source map for maintainers
+
+The main implementation points are:
+
+- `teeneagle_sync_sender/model/account_move.py` — invoice payloads, posting/edit/cancel/delete hooks, and invoice queue status.
+- `teeneagle_sync_sender/model/account_payment.py` — payment payloads, payment actions, received-state calculation, and returned bank markers.
+- `teeneagle_sync_sender/model/account_partial_reconcile.py` — reconcile/unreconcile queue generation.
+- `teeneagle_sync_sender/model/queue_account_move.py` — outgoing queue batching, scheduled transmission, response settlement, and line states.
+- `teeneagle_sync_sender/model/queue_account_incomming.py` and `queue_account_incomming_line.py` — incoming Enterprise queues and bank reconcile/unreconcile processing.
+- `teeneagle_sync_sender/model/res_partner.py` — contact payloads, hierarchy references, and contact queue generation.
+- `teeneagle_sync_sender/model/account_account.py`, `account_tax.py`, `account_tax_group.py`, `product_category.py`, `product_product.py`, and `product_template.py` — supporting master-data payloads and Enterprise-ID storage.
+- `teeneagle_sync_sender/data/scheduled_action.xml` — the 30-minute outgoing and incoming schedulers.
+- `teeneagle_sync_sender/views/queue_account_move.xml` and `queue_account_incomming.xml` — queue monitoring screens.
+- `teeneagle_sync_receiver/controllers/main.py` — Odoo 17 invoice, payment, and contact receiver endpoints included in this repository.
+
